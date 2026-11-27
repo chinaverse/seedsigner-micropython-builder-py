@@ -1,0 +1,4 @@
+# Builder-side submodule mods: patches must keep LF to `git apply` cleanly.
+deps/seedsigner-mods/** text eol=lf
+deps/seedsigner-lvgl-screens-mods/** text eol=lf
+*.ttf binary

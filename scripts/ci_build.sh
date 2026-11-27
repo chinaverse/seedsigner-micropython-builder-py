@@ -6,5 +6,6 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORKDIR="${1:-$ROOT_DIR/deps}"
 
 "$SCRIPT_DIR/apply_idf_mods.sh" "$WORKDIR"
+"$SCRIPT_DIR/apply_screens_mods.sh" "$WORKDIR"
 "$SCRIPT_DIR/apply_micropython_mods.sh" "$WORKDIR"
 "$SCRIPT_DIR/build_firmware.sh" "$WORKDIR"

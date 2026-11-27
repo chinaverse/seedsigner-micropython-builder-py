@@ -92,6 +92,44 @@ def _mirror(src, dst, ignore, label):
     print("[stage] %-10s %s -> %s (%d files)" % (label, src, dst, n))
 
 
+APP_MODS_DIR = os.path.join(_devenv.REPO_ROOT, "deps", "seedsigner-mods")
+
+
+def _apply_app_mods(frozen_root):
+    """Overlay deps/seedsigner-mods onto the mirrored app (never onto the app checkout).
+
+    new_files/ is copied over frozen_app/ verbatim; patches/*.patch (paths relative to
+    the app's src/, i.e. a/seedsigner/...) are applied in name order. Any patch that
+    does not apply cleanly aborts the stage -- a half-modded app must never be frozen.
+    """
+    new_files = os.path.join(APP_MODS_DIR, "new_files")
+    if os.path.isdir(new_files):
+        count = 0
+        for root, _, files in os.walk(new_files):
+            rel = os.path.relpath(root, new_files)
+            dst_dir = os.path.join(frozen_root, rel)
+            os.makedirs(dst_dir, exist_ok=True)
+            for name in files:
+                shutil.copy2(os.path.join(root, name), os.path.join(dst_dir, name))
+                count += 1
+        print("[stage] app mods: overlaid %d new file(s)" % count)
+
+    patch_dir = os.path.join(APP_MODS_DIR, "patches")
+    patches = sorted(p for p in os.listdir(patch_dir) if p.endswith(".patch")) \
+        if os.path.isdir(patch_dir) else []
+    # frozen_app/ is a gitignored dir INSIDE the builder repo; stop git's repo
+    # discovery at its parent so `git apply` runs in plain patch(1) mode on it.
+    env = dict(os.environ, GIT_CEILING_DIRECTORIES=os.path.dirname(os.path.abspath(frozen_root)))
+    for name in patches:
+        path = os.path.join(patch_dir, name)
+        try:
+            subprocess.run(["git", "apply", "--whitespace=nowarn", path],
+                           cwd=frozen_root, env=env, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            _die("app mod patch failed to apply: %s (%s)" % (name, e))
+        print("[stage] app mods: applied %s" % name)
+
+
 def _write_marker(path, fields):
     lines = [
         '"""Frozen-build marker: identifies the app tree baked into this firmware.',
@@ -136,6 +174,9 @@ def main():
     # 1-2. Clean-mirror both packages.
     _mirror(ss_src, ss_dst, SS_IGNORE, "seedsigner")
     _mirror(embit_src, embit_dst, EMBIT_IGNORE, "embit")
+
+    # 2b. Builder-side app mods (Chinese pinyin seed-word input, ...).
+    _apply_app_mods(FROZEN_ROOT)
 
     # 3. Determine + bake the version (AFTER the mirror so it survives the wipe).
     version, source = _version_bake.resolve_version(app_dir, src_root)
