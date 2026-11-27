@@ -47,9 +47,19 @@ locally, or the CI dist build: push to `main`, or a manual *Run workflow* with
 ## Native screen (seed_mnemonic_entry_screen) cfg added
 
 `match_keys` (prefix-match against these instead of `wordlist`), `values` (returned on
-accept, de-duplicated per candidate list), `cjk_candidates` (chain the 2048-glyph Noto
-Sans SC subset under the candidate font via lv_tiny_ttf). Without them the screen
-behaves exactly as before.
+accept, de-duplicated per candidate list), `cjk_candidates` (chain the 2048 BIP-39
+characters under the candidate font). Without them the screen behaves exactly as before.
+
+Listing rule (keeps lists short, max 45 entries): typed letters that form a complete
+syllable list only that syllable ("ji" -> 44, not the 172 of ji*); other prefixes list
+from 3 letters ("zh" -> nothing, "zho" -> zhong/zhou).
+
+Glyphs: on the 480-height profile (all ESP32-P4 boards) the characters come from a
+PRE-RENDERED 36px 4bpp font (`bip39_zh_36_4bpp.c`, ~1.2 MB flash, needs
+LV_FONT_FMT_TXT_LARGE). The first version rasterized them at runtime with lv_tiny_ttf:
+that stalled on every keystroke and dropped glyphs once the tiny_ttf cache index filled
+the 128 KB internal LVGL pool (docs/knowledge/cjk-glyph-cache-pool-overflow.md). Other
+profiles (desktop tools) still use the tiny_ttf subset.
 
 ## Tests
 

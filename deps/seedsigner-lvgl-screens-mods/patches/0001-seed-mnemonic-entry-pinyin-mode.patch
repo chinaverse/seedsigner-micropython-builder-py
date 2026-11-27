@@ -1,8 +1,39 @@
+diff --git a/components/seedsigner/CMakeLists.txt b/components/seedsigner/CMakeLists.txt
+index 846ad86..0110586 100644
+--- a/components/seedsigner/CMakeLists.txt
++++ b/components/seedsigner/CMakeLists.txt
+@@ -105,6 +105,15 @@ list(APPEND srcs
+ include("${CMAKE_CURRENT_LIST_DIR}/screen_sources.cmake")
+ list(APPEND srcs ${SEEDSIGNER_SCREEN_SOURCES})
+ 
++# Pinyin seed-word candidates: the 2048 BIP-39 simplified-Chinese characters
++# pre-rendered at 36px (builder mod). Its definition is gated on
++# LV_FONT_FMT_TXT_LARGE inside the file; the screen only references it when
++# SEEDSIGNER_HAS_BIP39_ZH_BITMAP is set, so desktop tools need neither.
++if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/fonts/bip39_zh_36_4bpp.c")
++    list(APPEND srcs "fonts/bip39_zh_36_4bpp.c")
++    set(SEEDSIGNER_HAS_BIP39_ZH_BITMAP 1)
++endif()
++
+ 
+ idf_component_register(
+     SRCS ${srcs}
+@@ -112,6 +121,10 @@ idf_component_register(
+     REQUIRES ${component_requires}
+ )
+ 
++if(SEEDSIGNER_HAS_BIP39_ZH_BITMAP)
++    target_compile_definitions(${COMPONENT_LIB} PRIVATE SEEDSIGNER_HAS_BIP39_ZH_BITMAP=1)
++endif()
++
+ target_compile_options(${COMPONENT_LIB} PRIVATE
+     $<$<COMPILE_LANGUAGE:CXX>:-fexceptions>
+ )
 diff --git a/components/seedsigner/screens/seed_mnemonic_entry_screen.cpp b/components/seedsigner/screens/seed_mnemonic_entry_screen.cpp
-index a7c646d..d2df613 100644
+index a7c646d..9639563 100644
 --- a/components/seedsigner/screens/seed_mnemonic_entry_screen.cpp
 +++ b/components/seedsigner/screens/seed_mnemonic_entry_screen.cpp
-@@ -51,6 +51,20 @@
+@@ -51,6 +51,21 @@
  //            absent -> the platform input profile decides.
  //   allow_screensaver         (bool, default true)   normalized by the parse layer;
  //            false stamps the screensaver opt-out flag on the root (scaffold layer).
@@ -11,8 +42,9 @@ index a7c646d..d2df613 100644
 +//   match_keys                (array of strings, same length as wordlist)  when present
 +//            the typed letters are prefix-matched (and the next-letter dimming is
 +//            derived) against match_keys[i] instead of wordlist[i]; wordlist[i] stays
-+//            the candidate LABEL. A candidate list is shown from 2 letters, or from 1
-+//            letter when that letter is itself a complete key (e.g. pinyin "e").
++//            the candidate LABEL. When the typed letters equal a complete key (a whole
++//            syllable, e.g. "ji" or "e") only that key's entries are listed;
++//            otherwise prefix matches are listed from 3 letters.
 +//   values                    (array of strings, same length as wordlist)  the string
 +//            returned when entry i is accepted (default wordlist[i]). Entries whose
 +//            value is already in the current candidate list are skipped, so one value
@@ -23,7 +55,7 @@ index a7c646d..d2df613 100644
  
  #include "screen_scaffold.h"  // parse_screen_json_ctx, create_top_nav_screen_scaffold, load_screen_and_cleanup_previous
  #include "seedsigner.h"       // screen_scaffold_t fields, seedsigner_lvgl_on_text_entered, seedsigner_lvgl_is_static_render
-@@ -85,6 +99,44 @@ using json = nlohmann::json;
+@@ -85,6 +100,65 @@ using json = nlohmann::json;
  static const size_t SEED_MNEMONIC_ENTRY_MATCH_MIN_LETTERS = 2;
  
  
@@ -33,13 +65,18 @@ index a7c646d..d2df613 100644
 +#include "fonts/bip39_zh_subset.inc"
 +#endif
 +
++#if defined(SEEDSIGNER_HAS_BIP39_ZH_BITMAP) && LV_FONT_FMT_TXT_LARGE
++// fonts/bip39_zh_36_4bpp.c: the same 2048 characters pre-rendered at 36px (compiled
++// only into the ESP32 component, which defines SEEDSIGNER_HAS_BIP39_ZH_BITMAP).
++extern "C" const lv_font_t bip39_zh_36_4bpp;
++#endif
++
 +// The candidate font with the BIP-39 Chinese glyph subset chained as its fallback,
 +// for the pinyin candidate list. Built once per candidate font (i.e. per display
 +// profile) and kept for the process lifetime: labels on a still-visible previous
 +// screen may reference it. Without tiny_ttf it degrades to the plain candidate font.
 +static const lv_font_t *seed_mnemonic_entry_cjk_candidate_font() {
 +    const lv_font_t *base = &CANDIDATE_FONT;
-+#if LV_USE_TINY_TTF
 +    struct Entry { const lv_font_t *base; lv_font_t font; };
 +    static Entry cache[3];
 +    static int cache_count = 0;
@@ -47,6 +84,22 @@ index a7c646d..d2df613 100644
 +        if (cache[i].base == base) return &cache[i].font;
 +    }
 +    if (cache_count >= (int)(sizeof(cache) / sizeof(cache[0]))) return base;
++
++#if defined(SEEDSIGNER_HAS_BIP39_ZH_BITMAP) && LV_FONT_FMT_TXT_LARGE
++    // 480-height profile (the ESP32-P4 boards): the PRE-RENDERED 36px glyph set.
++    // No runtime rasterization and no glyph cache -> no per-keystroke stall, and no
++    // use of the small internal LVGL pool that holds tiny_ttf's cache index (a long
++    // CJK candidate list exhausts it and glyphs silently stop drawing).
++    if (active_profile().px_multiplier == PX_MULTIPLIER_200) {
++        Entry &entry = cache[cache_count++];
++        entry.base = base;
++        entry.font = *base;      // shallow copy: same glyph data, own fallback pointer
++        entry.font.fallback = &bip39_zh_36_4bpp;
++        return &entry.font;
++    }
++#endif
++
++#if LV_USE_TINY_TTF
 +    // ~90% of the Latin line height keeps the (taller) CJK glyph boxes inside the
 +    // candidate rows, whose line metrics come from the primary (Latin) font.
 +    const int32_t cjk_px = (int32_t)lv_font_get_line_height(base) * 9 / 10;
@@ -68,7 +121,7 @@ index a7c646d..d2df613 100644
  namespace {
  
  // ---------------------------------------------------------------------------
-@@ -109,6 +161,11 @@ struct seed_mnemonic_entry_ctx_t {
+@@ -109,6 +183,11 @@ struct seed_mnemonic_entry_ctx_t {
      std::vector<const char *>           key_map;
      std::vector<lv_buttonmatrix_ctrl_t> ctrl_map;
  
@@ -80,7 +133,7 @@ index a7c646d..d2df613 100644
      // Matching state.
      std::vector<std::string> wordlist;
      std::vector<std::string> letters;           // locked letters + trailing live slot
-@@ -143,18 +200,45 @@ std::string seed_mnemonic_entry_prefix(const seed_mnemonic_entry_ctx_t *ctx) {
+@@ -143,18 +222,60 @@ std::string seed_mnemonic_entry_prefix(const seed_mnemonic_entry_ctx_t *ctx) {
      return (last_non_space == std::string::npos) ? std::string() : joined.substr(0, last_non_space + 1);
  }
  
@@ -94,17 +147,14 @@ index a7c646d..d2df613 100644
 +    return ctx->values.empty() ? ctx->wordlist[i] : ctx->values[i];
 +}
 +
++// Pinyin mode: a prefix that is not itself a whole syllable lists its matches only
++// from this many letters ("zh" alone would list ~160 characters).
++static const size_t SEED_MNEMONIC_ENTRY_PINYIN_PREFIX_MIN_LETTERS = 3;
++
  bool seed_mnemonic_entry_matches_shown(const seed_mnemonic_entry_ctx_t *ctx) {
--    return seed_mnemonic_entry_prefix(ctx).size() >= SEED_MNEMONIC_ENTRY_MATCH_MIN_LETTERS;
-+    std::string prefix = seed_mnemonic_entry_prefix(ctx);
-+    if (prefix.size() >= SEED_MNEMONIC_ENTRY_MATCH_MIN_LETTERS) return true;
-+    // Pinyin: a single letter that is itself a whole syllable ("a", "e") must be
-+    // listable, otherwise its characters could never be selected.
-+    if (prefix.empty() || ctx->match_keys.empty()) return false;
-+    for (int word_index : ctx->possible_words) {
-+        if (ctx->match_keys[word_index] == prefix) return true;
-+    }
-+    return false;
++    // Pinyin: calc_possible_words already applied the pinyin listing rule.
++    if (!ctx->match_keys.empty()) return !ctx->possible_words.empty();
+     return seed_mnemonic_entry_prefix(ctx).size() >= SEED_MNEMONIC_ENTRY_MATCH_MIN_LETTERS;
  }
  
 -// possible_words = every wordlist entry starting with the current prefix (reset
@@ -112,13 +162,30 @@ index a7c646d..d2df613 100644
 +// possible_words = every wordlist entry whose key starts with the current prefix
 +// (reset the highlight to the top of the new list). With `values`, an entry whose
 +// value is already listed is skipped (one candidate per value).
++//
++// Pinyin mode (match_keys) keeps the list short, like a pinyin IME: when the typed
++// letters are a complete syllable ("ji", "e") ONLY that syllable's characters are
++// listed (type on for "jia", "jian", ...); otherwise prefix matches are listed from
++// SEED_MNEMONIC_ENTRY_PINYIN_PREFIX_MIN_LETTERS letters. Every character stays
++// reachable through its own full syllable. Long lists are what made the screen lag.
  void seed_mnemonic_entry_calc_possible_words(seed_mnemonic_entry_ctx_t *ctx) {
      std::string prefix = seed_mnemonic_entry_prefix(ctx);
      ctx->possible_words.clear();
++    bool exact_only = false;
++    if (!prefix.empty() && !ctx->match_keys.empty()) {
++        for (const std::string &key : ctx->match_keys) {
++            if (key == prefix) { exact_only = true; break; }
++        }
++        if (!exact_only && prefix.size() < SEED_MNEMONIC_ENTRY_PINYIN_PREFIX_MIN_LETTERS) {
++            ctx->selected_index = 0;
++            return;
++        }
++    }
      if (!prefix.empty()) {
          for (int i = 0; i < (int)ctx->wordlist.size(); ++i) {
 -            if (ctx->wordlist[i].rfind(prefix, 0) == 0) ctx->possible_words.push_back(i);
-+            if (seed_mnemonic_entry_key(ctx, i).rfind(prefix, 0) != 0) continue;
++            const std::string &key = seed_mnemonic_entry_key(ctx, i);
++            if (exact_only ? (key != prefix) : (key.rfind(prefix, 0) != 0)) continue;
 +            if (!ctx->values.empty()) {
 +                bool duplicate = false;
 +                for (int listed : ctx->possible_words) {
@@ -130,18 +197,19 @@ index a7c646d..d2df613 100644
          }
      }
      ctx->selected_index = 0;
-@@ -170,8 +254,19 @@ void seed_mnemonic_entry_calc_possible_alphabet(seed_mnemonic_entry_ctx_t *ctx)
+@@ -170,8 +291,20 @@ void seed_mnemonic_entry_calc_possible_alphabet(seed_mnemonic_entry_ctx_t *ctx)
          size_t letter_num = ctx->letters.size() - 1;   // == len(search_letters)
          seed_mnemonic_entry_calc_possible_words(ctx);
          std::string alphabet;
 -        for (int word_index : ctx->possible_words) {
 -            const std::string &word = ctx->wordlist[word_index];
-+        // possible_words is de-duplicated by value in pinyin mode, which can drop the
-+        // only entry carrying some next letter; derive the alphabet from every key.
++        // In pinyin mode possible_words is filtered (exact syllable / min letters) and
++        // de-duplicated by value, so it can miss next letters; derive the alphabet
++        // from every key with this prefix instead.
 +        std::string prefix = seed_mnemonic_entry_prefix(ctx);
 +        std::vector<int> all_matches;
 +        const std::vector<int> *scan = &ctx->possible_words;
-+        if (!ctx->values.empty()) {
++        if (!ctx->match_keys.empty() || !ctx->values.empty()) {
 +            for (int i = 0; i < (int)ctx->wordlist.size(); ++i) {
 +                if (seed_mnemonic_entry_key(ctx, i).rfind(prefix, 0) == 0) all_matches.push_back(i);
 +            }
@@ -152,7 +220,7 @@ index a7c646d..d2df613 100644
              if (word.size() >= letter_num + 1) {
                  char next_letter = word[letter_num];
                  if (alphabet.find(next_letter) == std::string::npos) alphabet += next_letter;
-@@ -321,7 +416,7 @@ void seed_mnemonic_entry_render_matches_touch(seed_mnemonic_entry_ctx_t *ctx) {
+@@ -321,7 +454,7 @@ void seed_mnemonic_entry_render_matches_touch(seed_mnemonic_entry_ctx_t *ctx) {
  
          lv_obj_t *label = lv_label_create(row);
          lv_label_set_text(label, ctx->wordlist[ctx->possible_words[i]].c_str());
@@ -161,7 +229,7 @@ index a7c646d..d2df613 100644
          lv_obj_align(label, LV_ALIGN_LEFT_MID, 0, 0);
  
          seed_mnemonic_entry_style_candidate(row, false);
-@@ -414,8 +509,12 @@ void seed_mnemonic_entry_scroll(seed_mnemonic_entry_ctx_t *ctx, int direction) {
+@@ -414,8 +547,12 @@ void seed_mnemonic_entry_scroll(seed_mnemonic_entry_ctx_t *ctx, int direction) {
  // then hand the word to the host hook.
  void seed_mnemonic_entry_accept_word(seed_mnemonic_entry_ctx_t *ctx, int word_index) {
      if (word_index < 0 || word_index >= (int)ctx->wordlist.size()) return;
@@ -176,7 +244,7 @@ index a7c646d..d2df613 100644
      seedsigner_lvgl_on_text_entered(word.c_str());
  }
  
-@@ -597,6 +696,24 @@ void seed_mnemonic_entry_screen(void *ctx_json) {
+@@ -597,6 +734,24 @@ void seed_mnemonic_entry_screen(void *ctx_json) {
          if (word.is_string()) ctx->wordlist.push_back(word.get<std::string>());
      }
  
@@ -201,7 +269,7 @@ index a7c646d..d2df613 100644
      // initial_letters: accept a string ("ap") or an array (["a","p"]); normalize to
      // a list of single non-space chars.
      if (cfg.contains("initial_letters")) {
-@@ -636,7 +753,9 @@ void seed_mnemonic_entry_screen(void *ctx_json) {
+@@ -636,7 +791,9 @@ void seed_mnemonic_entry_screen(void *ctx_json) {
      //    (content_width + EDGE_PADDING in body-local coords), pushing it as far
      //    right as possible.
      lv_point_t longest_word_size;
@@ -212,7 +280,7 @@ index a7c646d..d2df613 100644
      const int32_t matches_column_width = longest_word_size.x + 2 * COMPONENT_PADDING;
      const int32_t column_gap           = COMPONENT_PADDING;
      const int32_t matches_x            = content_width + EDGE_PADDING - matches_column_width;
-@@ -735,7 +854,7 @@ void seed_mnemonic_entry_screen(void *ctx_json) {
+@@ -735,7 +892,7 @@ void seed_mnemonic_entry_screen(void *ctx_json) {
          // top.
          for (int i = 0; i < 3; ++i) {
              lv_obj_t *label = lv_label_create(body);
@@ -221,7 +289,7 @@ index a7c646d..d2df613 100644
              lv_obj_set_style_text_color(label, lv_color_hex(0xdddddd), LV_PART_MAIN);
              lv_obj_set_pos(label, matches_x + COMPONENT_PADDING, highlight_center - (i + 1) * row_height - line_height / 2);
              seed_mnemonic_entry_set_hidden(label, true);
-@@ -743,7 +862,7 @@ void seed_mnemonic_entry_screen(void *ctx_json) {
+@@ -743,7 +900,7 @@ void seed_mnemonic_entry_screen(void *ctx_json) {
          }
          for (int i = 0; i < 7; ++i) {
              lv_obj_t *label = lv_label_create(body);
@@ -230,7 +298,7 @@ index a7c646d..d2df613 100644
              lv_obj_set_style_text_color(label, lv_color_hex(0xdddddd), LV_PART_MAIN);
              lv_obj_set_pos(label, matches_x + COMPONENT_PADDING, highlight_center + (i + 1) * row_height - line_height / 2);
              seed_mnemonic_entry_set_hidden(label, true);
-@@ -766,7 +885,7 @@ void seed_mnemonic_entry_screen(void *ctx_json) {
+@@ -766,7 +923,7 @@ void seed_mnemonic_entry_screen(void *ctx_json) {
          lv_obj_set_style_pad_all(highlight, 0, LV_PART_MAIN);
          lv_obj_remove_flag(highlight, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
          lv_obj_t *highlight_label = lv_label_create(highlight);
